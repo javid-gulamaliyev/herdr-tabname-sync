@@ -31,8 +31,9 @@ The command is typed into the agent's composer and submitted with
 `herdr agent prompt`, so it only goes out when that is safe:
 
 - the agent is `idle` or `done`, not `working` or `blocked`;
-- the composer is empty (nothing after the prompt glyph except the agent's own
-  placeholder text), so the command is never appended to text you are typing;
+- the composer is empty (nothing after the last prompt glyph on screen except
+  the agent's own placeholder text), so the command is never appended to text
+  you are typing;
 - the agent is not on a permission prompt (`herdr agent prompt` refuses with
   `agent_blocked` before sending anything).
 
@@ -50,8 +51,8 @@ in an empty composer, add that text to `composer_is_empty`.
 
 ## State
 
-`herdr plugin config-dir` style state lives in the plugin's state directory
-(`HERDR_PLUGIN_STATE_DIR`):
+Queued renames live in the plugin's state directory
+(`~/.local/state/herdr/plugins/javid-gulamaliyev.tabname-sync` by default):
 
 ```
 pending/<pane_id>    desired session name for a rename not yet delivered
@@ -68,10 +69,14 @@ herdr plugin log list --plugin javid-gulamaliyev.tabname-sync
 shows every hook run with its stderr. Lines starting with `tabname-sync:` say
 why a rename was deferred or dropped.
 
-Codex support follows the same path as Claude Code but was verified against
-the Codex composer layout only; if Codex changes its placeholder text, the
-empty-composer check will defer renames until the pane goes idle again with a
-recognised prompt line.
+A status change can fire before the agent has redrawn its screen, so the
+composer check retries for a few seconds before deferring. If a rename still
+shows as deferred after the agent has gone idle, it is delivered on the pane's
+next status change, which for an idle session is the end of its next turn.
+
+Codex sets its terminal title to `<name> | <directory>`; the plugin treats that
+as already synced. If Codex changes its empty-composer placeholder text, the
+check will defer renames until `composer_is_empty` learns the new text.
 
 ## Development
 

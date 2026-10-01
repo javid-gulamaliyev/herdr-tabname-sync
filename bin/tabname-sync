@@ -64,7 +64,8 @@ deliver() {
   status=$(jq -r '.agent_status // ""' <<<"$pane")
   title=$(jq -r '.terminal_title_stripped // ""' <<<"$pane")
 
-  if [[ "$title" == "$name" ]]; then
+  # Claude Code sets the title to the session name; Codex appends " | <cwd>".
+  if [[ "$title" == "$name" || "$title" == "$name | "* ]]; then
     rm -f "$PENDING_DIR/$pane_id"
     return 0
   fi
@@ -80,10 +81,17 @@ deliver() {
       return 0
       ;;
   esac
-  if ! composer_is_empty "$pane_id"; then
-    log "pane $pane_id composer is not empty; rename stays pending"
-    return 0
-  fi
+  # A status change can fire before the agent has redrawn its screen, so a
+  # busy-looking composer gets a few seconds to settle before deferring.
+  local attempt
+  for attempt in 1 2 3; do
+    composer_is_empty "$pane_id" && break
+    if [[ $attempt -eq 3 ]]; then
+      log "pane $pane_id composer is not empty; rename stays pending"
+      return 0
+    fi
+    sleep 1
+  done
 
   if "$HERDR" agent prompt "$pane_id" "$command"; then
     rm -f "$PENDING_DIR/$pane_id"
