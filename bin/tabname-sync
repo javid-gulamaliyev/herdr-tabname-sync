@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# tabname-sync - keep an agent's session name equal to its herdr tab label.
+#
+# Subcommands (all invoked by herdr event hooks, not by hand):
+#   tabname-sync tab-renamed      HERDR_TAB_ID was renamed: queue + deliver
+#   tabname-sync status-changed   HERDR_PANE_ID changed agent status: retry
+#   tabname-sync deliver PANE_ID  send the queued rename if it is safe to
+#
+# A queued rename is one file per pane under $HERDR_PLUGIN_STATE_DIR/pending,
+# named by pane_id, containing the desired name. Keying by filename keeps each
+# write atomic on its own key: herdr spawns hooks independently per event, so
+# nothing here can lock or read-modify-write a shared file.
+
+set -euo pipefail
+
+: "${HERDR_BIN_PATH:?tabname-sync: must be started by herdr as a plugin hook}"
+: "${HERDR_PLUGIN_STATE_DIR:?tabname-sync: must be started by herdr as a plugin hook}"
+
+HERDR="$HERDR_BIN_PATH"
+PENDING_DIR="$HERDR_PLUGIN_STATE_DIR/pending"
+
+log() { printf 'tabname-sync: %s\n' "$*" >&2; }
+
+snapshot() { "$HERDR" api snapshot; }
+
+# Agents whose session can be renamed with a slash command. Add a case arm
+# here to support another agent.
+rename_command() {
+  local agent=$1 name=$2
+  case "$agent" in
+    claude | codex) printf '/rename %s' "$name" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The composer is the last visible line that starts with a prompt glyph. It
+# is empty when nothing follows the glyph, or only the agent's own placeholder
+# text does. Anything else is text the user is typing, which a sent rename
+# would be appended to.
+composer_is_empty() {
+  local pane_id=$1 line rest
+  line=$("$HERDR" pane read "$pane_id" --source visible --format text \
+    | grep -E '^[[:space:]]*(>|❯|›)' | tail -1 || true)
+  [[ -n "$line" ]] || return 1
+  rest=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*(>|❯|›)[[:space:]]*//; s/[[:space:]]+$//')
+  case "$rest" in
+    '' | 'Ask Codex to do anything') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+deliver() {
+  local pane_id=$1 name pane agent status title command
+  [[ -f "$PENDING_DIR/$pane_id" ]] || return 0
+  name=$(cat "$PENDING_DIR/$pane_id")
+
+  pane=$(snapshot | jq -c --arg id "$pane_id" '.result.snapshot.panes[] | select(.pane_id == $id)')
+  if [[ -z "$pane" ]]; then
+    log "pane $pane_id is gone; dropping pending rename"
+    rm -f "$PENDING_DIR/$pane_id"
+    return 0
+  fi
+  agent=$(jq -r '.agent // ""' <<<"$pane")
+  status=$(jq -r '.agent_status // ""' <<<"$pane")
+  title=$(jq -r '.terminal_title_stripped // ""' <<<"$pane")
+
+  if [[ "$title" == "$name" ]]; then
+    rm -f "$PENDING_DIR/$pane_id"
+    return 0
+  fi
+  if ! command=$(rename_command "$agent" "$name"); then
+    log "pane $pane_id runs unsupported agent '$agent'; dropping pending rename"
+    rm -f "$PENDING_DIR/$pane_id"
+    return 0
+  fi
+  case "$status" in
+    idle | done) ;;
+    *)
+      log "pane $pane_id is $status; rename stays pending"
+      return 0
+      ;;
+  esac
+  if ! composer_is_empty "$pane_id"; then
+    log "pane $pane_id composer is not empty; rename stays pending"
+    return 0
+  fi
+
+  if "$HERDR" agent prompt "$pane_id" "$command"; then
+    rm -f "$PENDING_DIR/$pane_id"
+    log "renamed $agent session in pane $pane_id"
+  else
+    log "prompt to pane $pane_id rejected; rename stays pending"
+  fi
+}
+
+tab_renamed() {
+  : "${HERDR_TAB_ID:?tabname-sync: tab.renamed hook without HERDR_TAB_ID}"
+  local snap label pane_id
+  snap=$(snapshot)
+  label=$(jq -r --arg id "$HERDR_TAB_ID" \
+    '.result.snapshot.tabs[] | select(.tab_id == $id) | .label // ""' <<<"$snap")
+  [[ -n "$label" ]] || return 0
+
+  mkdir -p "$PENDING_DIR"
+  while IFS= read -r pane_id; do
+    [[ -n "$pane_id" ]] || continue
+    printf '%s' "$label" >"$PENDING_DIR/$pane_id"
+    deliver "$pane_id"
+  done < <(jq -r --arg id "$HERDR_TAB_ID" \
+    '.result.snapshot.panes[] | select(.tab_id == $id and (.agent == "claude" or .agent == "codex")) | .pane_id' <<<"$snap")
+}
+
+status_changed() {
+  local pane_id
+  pane_id=${HERDR_PANE_ID:-$(printf '%s' "${HERDR_PLUGIN_EVENT_JSON:-}" | jq -r '.pane_id // ""')}
+  [[ -n "$pane_id" ]] || return 0
+  deliver "$pane_id"
+}
+
+case "${1:-}" in
+  tab-renamed) tab_renamed ;;
+  status-changed) status_changed ;;
+  deliver) deliver "${2:?tabname-sync deliver PANE_ID}" ;;
+  *)
+    log "usage: tabname-sync tab-renamed | status-changed | deliver PANE_ID"
+    exit 2
+    ;;
+esac

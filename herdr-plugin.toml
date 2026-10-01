@@ -1,0 +1,20 @@
+# tabname-sync — rename the agent session in a tab whenever the herdr tab is renamed.
+#
+# One-way: the herdr tab label is the source of truth. The agent's own rename
+# changes its terminal title, never the tab label, so there is no feedback loop.
+id = "javid-gulamaliyev.tabname-sync"
+name = "tabname-sync"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Rename the Claude Code or Codex session in a tab whenever the herdr tab is renamed."
+platforms = ["macos", "linux"]
+
+[[events]]
+on = "tab.renamed"
+command = ["./bin/tabname-sync", "tab-renamed"]
+
+# A rename that could not be delivered (agent working, composer in use, or on
+# a permission prompt) is retried when the pane's agent status next changes.
+[[events]]
+on = "pane.agent_status_changed"
+command = ["./bin/tabname-sync", "status-changed"]
